@@ -86,10 +86,18 @@ jobs:
           BENCH_READY_TIMEOUT_SECONDS: ${{ inputs.ready_timeout_seconds }}
         run: node scripts/bench/run-repro-bench.mjs
 
+      - name: Inspect repro artifacts
+        if: ${{ failure() }}
+        run: |
+          echo "Artifact directory: $BENCH_ARTIFACTS_DIR"
+          ls -la "$BENCH_ARTIFACTS_DIR" || true
+          find "$BENCH_ARTIFACTS_DIR" -maxdepth 2 -type f | sort || true
+
       - name: Upload repro artifacts
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-metro-repro-bench-artifacts
           path: ${{ env.BENCH_ARTIFACTS_DIR }}
+          include-hidden-files: true
           if-no-files-found: warn
