@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildBenchUrl,
   chooseSimulatorDevice,
+  parseBenchUrl,
   parseRuntimeVersion,
 } from './lib.mjs';
 
@@ -43,4 +44,22 @@ test('buildBenchUrl encodes the iteration payload', () => {
     url,
     'metrobench://bench?callbackPort=4010&iteration=7&launchToken=token-123&launchedAt=2026-03-27T12%3A00%3A00.000Z',
   );
+});
+
+test('buildBenchUrl round-trips through parseBenchUrl for launch delivery', () => {
+  const url = buildBenchUrl({
+    callbackPort: 4010,
+    iteration: 7,
+    launchToken: 'token-123',
+    launchedAt: '2026-03-27T12:00:00.000Z',
+    scheme: 'metrobench',
+  });
+
+  assert.deepEqual(parseBenchUrl(url), {
+    callbackPort: 4010,
+    iteration: 7,
+    launchToken: 'token-123',
+    launchedAt: '2026-03-27T12:00:00.000Z',
+    url,
+  });
 });

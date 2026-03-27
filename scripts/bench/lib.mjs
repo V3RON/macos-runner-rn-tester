@@ -33,6 +33,46 @@ export function buildBenchUrl({
   return url.toString();
 }
 
+export function parseBenchUrl(url) {
+  if (!url) {
+    return null;
+  }
+
+  let parsedUrl;
+
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return null;
+  }
+
+  const iteration = Number(parsedUrl.searchParams.get('iteration') ?? '');
+  const callbackPort = Number(
+    parsedUrl.searchParams.get('callbackPort') ?? DEFAULT_CALLBACK_PORT,
+  );
+  const launchToken = parsedUrl.searchParams.get('launchToken') ?? '';
+  const launchedAt = parsedUrl.searchParams.get('launchedAt') ?? '';
+
+  if (
+    !Number.isInteger(iteration) ||
+    iteration <= 0 ||
+    !Number.isInteger(callbackPort) ||
+    callbackPort <= 0 ||
+    launchToken.length === 0 ||
+    launchedAt.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    callbackPort,
+    iteration,
+    launchToken,
+    launchedAt,
+    url,
+  };
+}
+
 export function chooseSimulatorDevice(devicesByRuntime, requestedName) {
   const runtimes = Object.entries(devicesByRuntime)
     .map(([runtimeIdentifier, devices]) => ({

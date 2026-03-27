@@ -501,10 +501,6 @@ async function terminateApp(udid, bundleIdentifier) {
   });
 }
 
-async function launchApp(udid, bundleIdentifier) {
-  return runCommand('xcrun', ['simctl', 'launch', udid, bundleIdentifier]);
-}
-
 async function openBenchUrl(udid, url) {
   return runCommand('xcrun', ['simctl', 'openurl', udid, url]);
 }
@@ -628,19 +624,8 @@ async function main() {
       await logTimeline('iteration_started', { iteration, launchToken });
 
       try {
-        const launchResult = await launchApp(device.udid, bundleIdentifier);
-        consoleState('App launch command completed', {
-          iteration,
-          stderr: launchResult.stderr.trim(),
-          stdout: launchResult.stdout.trim(),
-        });
-        await logTimeline('launch_command_complete', {
-          iteration,
-          stderr: launchResult.stderr.trim(),
-          stdout: launchResult.stdout.trim(),
-        });
         await openBenchUrl(device.udid, benchUrl);
-        consoleState('Sent bench deep link to app', {
+        consoleState('Requested app launch via bench deep link', {
           iteration,
           url: benchUrl,
         });
