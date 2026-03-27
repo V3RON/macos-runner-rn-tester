@@ -53,28 +53,41 @@ jobs:
         run: npx expo prebuild --platform ios --clean
 
       - name: Build Debug simulator app
+        working-directory: ios
         shell: bash
         run: |
           set -euo pipefail
 
+          BUILD_DEVICE_NAME="${{ inputs.device_name }}"
+          if [[ -z "$BUILD_DEVICE_NAME" ]]; then
+            BUILD_DEVICE_NAME="iPhone 17 Pro"
+          fi
+
           xcodebuild \
-            -workspace ios/MetroBench.xcworkspace \
+            CC=clang CPLUSPLUS=clang++ LD=clang LDPLUSPLUS=clang++ \
+            -workspace MetroBench.xcworkspace \
             -scheme MetroBench \
+            -derivedDataPath build \
+            -UseModernBuildSystem=YES \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath build/DerivedData \
-            build | tee "$BENCH_ARTIFACTS_DIR/build.log"
+            -destination "platform=iOS Simulator,name=$BUILD_DEVICE_NAME" \
+            -showBuildTimingSummary \
+            ONLY_ACTIVE_ARCH=YES \
+            build \
+            CODE_SIGNING_ALLOWED=NO | tee "$BENCH_ARTIFACTS_DIR/build.log"
 
       - name: Find built app bundle
         id: app_bundle
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$(find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name '*.app' | head -n 1)"
+          APP_PATH="$GITHUB_WORKSPACE/ios/build/Build/Products/Debug-iphonesimulator/MetroBench.app"
 
-          if [[ -z "$APP_PATH" ]]; then
-            echo "Failed to find the built .app bundle." >&2
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "Failed to find the built .app bundle at $APP_PATH" >&2
+            echo "Known build outputs:" >&2
+            find "$GITHUB_WORKSPACE/ios/build" -maxdepth 4 \( -name '*.app' -o -name '*.framework' \) | sort >&2 || true
             exit 1
           fi
 
