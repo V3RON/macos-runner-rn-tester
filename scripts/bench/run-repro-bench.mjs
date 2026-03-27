@@ -77,6 +77,16 @@ async function logTimeline(event, payload = {}) {
   });
 }
 
+function consoleState(message, payload = undefined) {
+  const timestamp = new Date().toISOString();
+  if (payload === undefined) {
+    console.log(`[bench] ${timestamp} ${message}`);
+    return;
+  }
+
+  console.log(`[bench] ${timestamp} ${message} ${JSON.stringify(payload)}`);
+}
+
 async function runCommand(command, args, options = {}) {
   const { allowFailure = false, cwd = rootDir } = options;
 
@@ -282,9 +292,12 @@ class ReporterLogMonitor {
   }
 }
 
-function pipeChildOutput(child, outputPath, prefix) {
+function pipeChildOutput(child, outputPath, prefix, mirrorToConsole = false) {
   const writeChunk = async (chunk) => {
     await appendLine(outputPath, `[${new Date().toISOString()}] ${prefix} ${chunk}`);
+    if (mirrorToConsole && chunk) {
+      console.log(`[${prefix}] ${chunk}`);
+    }
   };
 
   child.stdout?.on('data', (chunk) => {
@@ -296,6 +309,12 @@ function pipeChildOutput(child, outputPath, prefix) {
 }
 
 function startMetro() {
+  consoleState('Starting Metro process', {
+    command: ['npx', 'expo', 'start', '--dev-client', '--localhost', '--port', String(metroPort)],
+    cwd: rootDir,
+    port: metroPort,
+  });
+
   const metro = spawn(
     'npx',
     ['expo', 'start', '--dev-client', '--localhost', '--port', String(metroPort)],
@@ -310,7 +329,8 @@ function startMetro() {
     },
   );
 
-  pipeChildOutput(metro, metroLogPath, 'metro');
+  consoleState('Metro process spawned', { pid: metro.pid ?? null });
+  pipeChildOutput(metro, metroLogPath, 'metro', true);
   return metro;
 }
 
@@ -332,9 +352,15 @@ async function stopChild(child, signal = 'SIGINT') {
 
 async function waitForMetroReady(metro) {
   const deadline = Date.now() + bundleTimeoutMs;
+  let lastStatus = 'waiting for first /status response';
+  let nextProgressReportAt = Date.now();
 
   while (Date.now() < deadline) {
     if (metro.exitCode !== null) {
+      consoleState('Metro exited before becoming ready', {
+        exitCode: metro.exitCode,
+        lastStatus,
+      });
       throw new Error(`Metro exited early with code ${metro.exitCode}.`);
     }
 
@@ -343,16 +369,34 @@ async function waitForMetroReady(metro) {
         signal: AbortSignal.timeout(1000),
       });
       const body = await response.text();
+      lastStatus = `HTTP ${response.status}: ${body.trim()}`;
       if (response.ok && body.includes('packager-status:running')) {
+        consoleState('Metro /status is healthy', {
+          elapsedMs: bundleTimeoutMs - (deadline - Date.now()),
+          status: lastStatus,
+        });
         return;
       }
-    } catch {
-      // Keep polling until the timeout expires.
+    } catch (error) {
+      lastStatus = error instanceof Error ? error.message : String(error);
+    }
+
+    if (Date.now() >= nextProgressReportAt) {
+      consoleState('Waiting for Metro readiness', {
+        elapsedMs: bundleTimeoutMs - (deadline - Date.now()),
+        pid: metro.pid ?? null,
+        status: lastStatus,
+      });
+      nextProgressReportAt = Date.now() + 5000;
     }
 
     await sleep(500);
   }
 
+  consoleState('Metro did not become ready before timeout', {
+    lastStatus,
+    timeoutMs: bundleTimeoutMs,
+  });
   throw new Error('Metro did not become ready before the timeout.');
 }
 
@@ -465,6 +509,17 @@ async function main() {
   }
 
   await fs.access(appPath);
+  consoleState('Bench configuration loaded', {
+    appPath,
+    artifactsDir,
+    bundleIdentifier,
+    bundleTimeoutMs,
+    callbackPort,
+    iterations,
+    metroPort,
+    readyTimeoutMs,
+    urlScheme,
+  });
   await logTimeline('bench_started', {
     appPath,
     bundleIdentifier,
@@ -492,6 +547,7 @@ async function main() {
 
   try {
     await callbackServer.start();
+    consoleState('Callback server listening', { port: callbackPort });
 
     metro = startMetro();
     await waitForMetroReady(metro);
@@ -499,11 +555,15 @@ async function main() {
 
     const device = await pickSimulatorUdId(process.env.BENCH_DEVICE_NAME);
     summary.device = device;
+    consoleState('Selected simulator device', device);
     await logTimeline('simulator_selected', device);
     await bootSimulator(device.udid);
+    consoleState('Simulator booted', { name: device.name, udid: device.udid });
 
     simulatorLogs = startSimulatorLogStream(device.udid);
+    consoleState('Started simulator log stream', { udid: device.udid });
     await installApp(device.udid, bundleIdentifier, appPath);
+    consoleState('Installed app on simulator', { appPath, bundleIdentifier, udid: device.udid });
     await logTimeline('app_installed', { appPath, udid: device.udid });
 
     for (let iteration = 1; iteration <= iterations; iteration += 1) {
@@ -521,16 +581,30 @@ async function main() {
       await terminateApp(device.udid, bundleIdentifier);
       await fs.rm(videoPath, { force: true });
       recording = startRecording(device.udid);
+      consoleState('Starting iteration', {
+        iteration,
+        launchToken,
+        videoPath,
+      });
       await logTimeline('iteration_started', { iteration, launchToken });
 
       try {
         const launchResult = await launchApp(device.udid, bundleIdentifier);
+        consoleState('App launch command completed', {
+          iteration,
+          stderr: launchResult.stderr.trim(),
+          stdout: launchResult.stdout.trim(),
+        });
         await logTimeline('launch_command_complete', {
           iteration,
           stderr: launchResult.stderr.trim(),
           stdout: launchResult.stdout.trim(),
         });
         await openBenchUrl(device.udid, benchUrl);
+        consoleState('Sent bench deep link to app', {
+          iteration,
+          url: benchUrl,
+        });
 
         const bundleEvent = await reporterMonitor.waitFor(
           (event) => event.type === 'bundle_build_started',
@@ -538,10 +612,20 @@ async function main() {
         );
 
         if (!bundleEvent) {
+          consoleState('Timed out waiting for Metro bundling', {
+            iteration,
+            timeoutMs: bundleTimeoutMs,
+          });
           throw Object.assign(new Error('No Metro bundling detected before timeout.'), {
             code: 'bundle_timeout',
           });
         }
+
+        consoleState('Detected Metro bundling activity', {
+          iteration,
+          eventType: bundleEvent.type,
+          timestamp: bundleEvent.timestamp ?? null,
+        });
 
         const readyEvent = await callbackServer.waitForReady(
           { iteration, launchToken },
@@ -549,10 +633,20 @@ async function main() {
         );
 
         if (!readyEvent) {
+          consoleState('Timed out waiting for app-ready callback', {
+            iteration,
+            timeoutMs: readyTimeoutMs,
+          });
           throw Object.assign(new Error('App did not report readiness before timeout.'), {
             code: 'app_ready_timeout',
           });
         }
+
+        consoleState('Received app-ready callback', {
+          iteration,
+          launchToken,
+          receivedAt: readyEvent.receivedAt,
+        });
 
         summary.iterations.push({
           appReadyEvent: readyEvent,
@@ -563,6 +657,7 @@ async function main() {
           status: 'passed',
         });
         await logTimeline('iteration_passed', { iteration, launchToken });
+        consoleState('Iteration passed', { iteration, launchToken });
         await terminateApp(device.udid, bundleIdentifier);
         await stopChild(recording);
         recording = null;
@@ -590,6 +685,12 @@ async function main() {
           iteration,
           launchToken,
         });
+        consoleState('Iteration failed', {
+          failureCode,
+          iteration,
+          launchToken,
+          message: error instanceof Error ? error.message : String(error),
+        });
         await terminateApp(device.udid, bundleIdentifier);
         await stopChild(recording);
         recording = null;
@@ -598,6 +699,7 @@ async function main() {
     }
 
     summary.status = 'passed';
+    consoleState('Bench completed successfully');
   } catch (error) {
     if (summary.status !== 'failed') {
       summary.status =
@@ -608,6 +710,10 @@ async function main() {
     } else {
       summary.error = serializeError(error);
     }
+    consoleState('Bench failed', {
+      message: error instanceof Error ? error.message : String(error),
+      status: summary.status,
+    });
     throw error;
   } finally {
     await writeSummary(summary);
@@ -616,6 +722,7 @@ async function main() {
     await stopChild(metro);
     await callbackServer.stop().catch(() => {});
     await logTimeline('bench_finished', { status: summary.status });
+    consoleState('Bench cleanup finished', { status: summary.status });
   }
 }
 
