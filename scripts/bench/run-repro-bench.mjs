@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  APP_REMOVAL_FINISHED_MESSAGE,
+  APP_REMOVAL_STARTED_MESSAGE,
   DEFAULT_BENCH_ARTIFACTS_DIR,
   DEFAULT_BUNDLE_TIMEOUT_SECONDS,
   DEFAULT_CALLBACK_PORT,
@@ -16,6 +18,7 @@ import {
   buildBenchLaunchArguments,
   chooseSimulatorDevice,
   inspectExpectedReadyEvent,
+  normalizeCommandLogOutput,
   parsePositiveInt,
   serializeError,
   serializeLaunchArgumentsForSimctl,
@@ -530,17 +533,19 @@ function startRecording(udid) {
 
 async function installApp(udid, bundleIdentifier, appPath) {
   const uninstallStartedAt = Date.now();
-  consoleState('Removing existing app before install', {
+  consoleState(APP_REMOVAL_STARTED_MESSAGE, {
     bundleIdentifier,
     udid,
   });
   const uninstallResult = await runCommand('xcrun', ['simctl', 'uninstall', udid, bundleIdentifier], {
     allowFailure: true,
   });
-  consoleState('Finished app removal step', {
+  consoleState(APP_REMOVAL_FINISHED_MESSAGE, {
     bundleIdentifier,
     code: uninstallResult.code,
     elapsedMs: Date.now() - uninstallStartedAt,
+    stderr: normalizeCommandLogOutput(uninstallResult.stderr) ?? null,
+    stdout: normalizeCommandLogOutput(uninstallResult.stdout) ?? null,
     udid,
   });
 
