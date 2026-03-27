@@ -15,6 +15,7 @@ import {
   DEFAULT_READY_TIMEOUT_SECONDS,
   buildBenchLaunchArguments,
   chooseSimulatorDevice,
+  inspectExpectedReadyEvent,
   parsePositiveInt,
   serializeError,
   serializeLaunchArgumentsForSimctl,
@@ -157,6 +158,9 @@ class CallbackServer {
         try {
           payload = JSON.parse(body);
         } catch {
+          consoleState('Received invalid app-ready callback payload', {
+            bodyPreview: body.slice(0, 200),
+          });
           response.writeHead(400).end();
           return;
         }
@@ -168,6 +172,21 @@ class CallbackServer {
 
         this.events.push(entry);
         await appendJsonLine(callbackLogPath, entry);
+        consoleState('Received app-ready callback HTTP request', {
+          expectedIteration: this.expectedIteration,
+          expectedLaunchToken: this.expectedLaunchToken,
+          matchesExpectedCallback:
+            entry.iteration === this.expectedIteration &&
+            entry.launchToken === this.expectedLaunchToken,
+          receivedEvent: {
+            appName: entry.appName ?? null,
+            iteration: entry.iteration ?? null,
+            launchToken: entry.launchToken ?? null,
+            platform: entry.platform ?? null,
+            receivedAt: entry.receivedAt,
+            timestamp: entry.timestamp ?? null,
+          },
+        });
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ ok: true }));
         return;
@@ -202,16 +221,36 @@ class CallbackServer {
 
   async waitForReady({ iteration, launchToken }, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
+    let nextProgressReportAt = Date.now();
+
+    consoleState('Waiting for app-ready callback', {
+      iteration,
+      launchToken,
+      observedEventCount: this.events.length,
+      timeoutMs,
+    });
 
     while (Date.now() < deadline) {
-      const event = this.events.find(
-        (candidate) =>
-          candidate.iteration === iteration &&
-          candidate.launchToken === launchToken,
-      );
+      const { lastObservedEvent, matchedEvent, observedEventCount } =
+        inspectExpectedReadyEvent(this.events, {
+          iteration,
+          launchToken,
+        });
 
-      if (event) {
-        return event;
+      if (matchedEvent) {
+        return matchedEvent;
+      }
+
+      if (Date.now() >= nextProgressReportAt) {
+        consoleState('Still waiting for app-ready callback', {
+          elapsedMs: timeoutMs - (deadline - Date.now()),
+          iteration,
+          lastObservedEvent,
+          launchToken,
+          observedEventCount,
+          timeoutMs,
+        });
+        nextProgressReportAt = Date.now() + 5000;
       }
 
       await sleep(250);
@@ -490,15 +529,50 @@ function startRecording(udid) {
 }
 
 async function installApp(udid, bundleIdentifier, appPath) {
-  await runCommand('xcrun', ['simctl', 'uninstall', udid, bundleIdentifier], {
+  const uninstallStartedAt = Date.now();
+  consoleState('Removing existing app before install', {
+    bundleIdentifier,
+    udid,
+  });
+  const uninstallResult = await runCommand('xcrun', ['simctl', 'uninstall', udid, bundleIdentifier], {
     allowFailure: true,
   });
+  consoleState('Finished app removal step', {
+    bundleIdentifier,
+    code: uninstallResult.code,
+    elapsedMs: Date.now() - uninstallStartedAt,
+    udid,
+  });
+
+  const installStartedAt = Date.now();
+  consoleState('Installing app on simulator', {
+    appPath,
+    bundleIdentifier,
+    udid,
+  });
   await runCommand('xcrun', ['simctl', 'install', udid, appPath]);
+  consoleState('Finished app install command', {
+    appPath,
+    bundleIdentifier,
+    elapsedMs: Date.now() - installStartedAt,
+    udid,
+  });
 }
 
 async function terminateApp(udid, bundleIdentifier) {
-  await runCommand('xcrun', ['simctl', 'terminate', udid, bundleIdentifier], {
+  const terminateStartedAt = Date.now();
+  consoleState('Terminating app on simulator', {
+    bundleIdentifier,
+    udid,
+  });
+  const result = await runCommand('xcrun', ['simctl', 'terminate', udid, bundleIdentifier], {
     allowFailure: true,
+  });
+  consoleState('Finished app termination command', {
+    bundleIdentifier,
+    code: result.code,
+    elapsedMs: Date.now() - terminateStartedAt,
+    udid,
   });
 }
 
@@ -609,9 +683,27 @@ async function main() {
       });
 
       callbackServer.expect({ iteration, launchToken });
+      consoleState('Preparing iteration resources', {
+        iteration,
+        launchToken,
+        videoPath,
+      });
       await terminateApp(device.udid, bundleIdentifier);
+      consoleState('Removing previous recording file', {
+        iteration,
+        videoPath,
+      });
       await fs.rm(videoPath, { force: true });
+      consoleState('Removed previous recording file', {
+        iteration,
+        videoPath,
+      });
       recording = startRecording(device.udid);
+      consoleState('Started simulator recording', {
+        iteration,
+        pid: recording.pid ?? null,
+        videoPath,
+      });
       consoleState('Starting iteration', {
         iteration,
         launchToken,
@@ -624,6 +716,10 @@ async function main() {
         consoleState('Requested app launch via simctl launch arguments', {
           iteration,
           launchArguments: benchLaunchArguments,
+        });
+        consoleState('Waiting for Metro bundling activity', {
+          iteration,
+          timeoutMs: bundleTimeoutMs,
         });
 
         const bundleEvent = await metroStdoutMonitor.waitFor(

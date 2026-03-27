@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildBenchLaunchArguments,
   chooseSimulatorDevice,
+  inspectExpectedReadyEvent,
   parseBenchLaunchArguments,
   parseRuntimeVersion,
   serializeLaunchArgumentsForSimctl,
@@ -117,5 +118,78 @@ test('parseBenchLaunchArguments rejects missing required launch parameters', () 
       launchToken: 'token-123',
     }),
     null,
+  );
+});
+
+test('inspectExpectedReadyEvent returns the matching callback event when present', () => {
+  const matchingEvent = {
+    appName: 'MetroBench',
+    iteration: 7,
+    launchToken: 'token-123',
+    platform: 'ios',
+    receivedAt: '2026-03-27T12:00:05.000Z',
+    timestamp: '2026-03-27T12:00:04.000Z',
+  };
+  const otherEvent = {
+    iteration: 6,
+    launchToken: 'token-456',
+    receivedAt: '2026-03-27T12:00:03.000Z',
+  };
+
+  assert.deepEqual(
+    inspectExpectedReadyEvent([otherEvent, matchingEvent], {
+      iteration: 7,
+      launchToken: 'token-123',
+    }),
+    {
+      lastObservedEvent: {
+        appName: 'MetroBench',
+        iteration: 7,
+        launchToken: 'token-123',
+        platform: 'ios',
+        receivedAt: '2026-03-27T12:00:05.000Z',
+        timestamp: '2026-03-27T12:00:04.000Z',
+      },
+      matchedEvent: matchingEvent,
+      observedEventCount: 2,
+    },
+  );
+});
+
+test('inspectExpectedReadyEvent reports the latest mismatched callback while still waiting', () => {
+  assert.deepEqual(
+    inspectExpectedReadyEvent(
+      [
+        {
+          iteration: 1,
+          launchToken: 'old-token',
+          receivedAt: '2026-03-27T12:00:01.000Z',
+        },
+        {
+          appName: 'MetroBench',
+          iteration: 2,
+          launchToken: 'other-token',
+          platform: 'ios',
+          receivedAt: '2026-03-27T12:00:02.000Z',
+          timestamp: '2026-03-27T12:00:01.500Z',
+        },
+      ],
+      {
+        iteration: 3,
+        launchToken: 'expected-token',
+      },
+    ),
+    {
+      lastObservedEvent: {
+        appName: 'MetroBench',
+        iteration: 2,
+        launchToken: 'other-token',
+        platform: 'ios',
+        receivedAt: '2026-03-27T12:00:02.000Z',
+        timestamp: '2026-03-27T12:00:01.500Z',
+      },
+      matchedEvent: null,
+      observedEventCount: 2,
+    },
   );
 });

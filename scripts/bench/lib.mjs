@@ -68,6 +68,39 @@ export function parseBenchLaunchArguments(launchArguments) {
   };
 }
 
+function summarizeReadyEvent(event) {
+  if (!event || typeof event !== 'object') {
+    return null;
+  }
+
+  return {
+    appName: typeof event.appName === 'string' ? event.appName : null,
+    iteration:
+      typeof event.iteration === 'number' || typeof event.iteration === 'string'
+        ? event.iteration
+        : null,
+    launchToken: typeof event.launchToken === 'string' ? event.launchToken : null,
+    platform: typeof event.platform === 'string' ? event.platform : null,
+    receivedAt: typeof event.receivedAt === 'string' ? event.receivedAt : null,
+    timestamp: typeof event.timestamp === 'string' ? event.timestamp : null,
+  };
+}
+
+export function inspectExpectedReadyEvent(events, { iteration, launchToken }) {
+  const eventList = Array.isArray(events) ? events : [];
+  const matchedEvent =
+    eventList.find(
+      (candidate) =>
+        candidate?.iteration === iteration && candidate?.launchToken === launchToken,
+    ) ?? null;
+
+  return {
+    lastObservedEvent: summarizeReadyEvent(eventList.at(-1) ?? null),
+    matchedEvent,
+    observedEventCount: eventList.length,
+  };
+}
+
 export function serializeLaunchArgumentsForSimctl(launchArguments) {
   return Object.entries(launchArguments).flatMap(([key, value]) => [
     `-${key}`,
