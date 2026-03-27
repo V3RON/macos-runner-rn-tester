@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  APP_REMOVAL_FINISHED_MESSAGE,
+  APP_REMOVAL_STARTED_MESSAGE,
   buildBenchLaunchArguments,
   chooseSimulatorDevice,
   inspectExpectedReadyEvent,
+  normalizeCommandLogOutput,
   parseBenchLaunchArguments,
   parseRuntimeVersion,
   serializeLaunchArgumentsForSimctl,
@@ -191,5 +194,25 @@ test('inspectExpectedReadyEvent reports the latest mismatched callback while sti
       matchedEvent: null,
       observedEventCount: 2,
     },
+  );
+});
+
+test('app removal log messages make the simctl uninstall step explicit', () => {
+  assert.equal(
+    APP_REMOVAL_STARTED_MESSAGE,
+    'Running simctl uninstall for existing app before install',
+  );
+  assert.equal(
+    APP_REMOVAL_FINISHED_MESSAGE,
+    'Finished simctl uninstall for existing app',
+  );
+});
+
+test('normalizeCommandLogOutput trims empty command output out of follow-up logs', () => {
+  assert.equal(normalizeCommandLogOutput(''), undefined);
+  assert.equal(normalizeCommandLogOutput('  \n  '), undefined);
+  assert.equal(
+    normalizeCommandLogOutput('\nNo such file or app installed.\n'),
+    'No such file or app installed.',
   );
 });

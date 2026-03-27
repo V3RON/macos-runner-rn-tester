@@ -4,6 +4,9 @@ export const DEFAULT_CALLBACK_PORT = 4010;
 export const DEFAULT_ITERATIONS = 10;
 export const DEFAULT_METRO_PORT = 8081;
 export const DEFAULT_READY_TIMEOUT_SECONDS = 30;
+export const APP_REMOVAL_STARTED_MESSAGE =
+  'Running simctl uninstall for existing app before install';
+export const APP_REMOVAL_FINISHED_MESSAGE = 'Finished simctl uninstall for existing app';
 
 function compareRuntimeVersions(left, right) {
   const maxLength = Math.max(left.length, right.length);
@@ -66,6 +69,15 @@ export function parseBenchLaunchArguments(launchArguments) {
     launchToken,
     launchedAt,
   };
+}
+
+export function normalizeCommandLogOutput(output) {
+  if (typeof output !== 'string') {
+    return undefined;
+  }
+
+  const normalizedOutput = output.trim();
+  return normalizedOutput ? normalizedOutput : undefined;
 }
 
 function summarizeReadyEvent(event) {
