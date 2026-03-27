@@ -2,7 +2,7 @@
 
 This repository contains a tiny Expo app plus a CI bench that repeatedly launches the same debug iOS simulator build against Metro without rebuilding the app or rebooting the simulator.
 
-Each bench iteration starts the app by opening its custom URL, so the system “Open in Metro Bench” confirmation is what triggers the launch and carries the bench payload into `Linking.getInitialURL()`.
+Each bench iteration asks the simulator to open the app's custom URL with `simctl openurl`. That delivers the bench payload in the launch URL for `Linking.getInitialURL()`, but `simctl` itself does not click or dismiss the system “Open in Metro Bench” confirmation dialog.
 
 ## What it captures
 

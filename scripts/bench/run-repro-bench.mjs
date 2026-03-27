@@ -625,7 +625,7 @@ async function main() {
 
       try {
         await openBenchUrl(device.udid, benchUrl);
-        consoleState('Requested app launch via bench deep link', {
+        consoleState('Requested app launch via bench deep link (simctl does not confirm system dialogs)', {
           iteration,
           url: benchUrl,
         });
