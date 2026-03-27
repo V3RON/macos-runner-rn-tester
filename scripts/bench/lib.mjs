@@ -46,19 +46,24 @@ export function parseBenchUrl(url) {
     return null;
   }
 
-  const iteration = Number(parsedUrl.searchParams.get('iteration') ?? '');
-  const callbackPort = Number(
-    parsedUrl.searchParams.get('callbackPort') ?? DEFAULT_CALLBACK_PORT,
-  );
-  const launchToken = parsedUrl.searchParams.get('launchToken') ?? '';
-  const launchedAt = parsedUrl.searchParams.get('launchedAt') ?? '';
+  const iterationParam = parsedUrl.searchParams.get('iteration');
+  const callbackPortParam = parsedUrl.searchParams.get('callbackPort');
+  const launchToken = parsedUrl.searchParams.get('launchToken');
+  const launchedAt = parsedUrl.searchParams.get('launchedAt');
+  const iteration = iterationParam === null ? Number.NaN : Number(iterationParam);
+  const callbackPort =
+    callbackPortParam === null
+      ? DEFAULT_CALLBACK_PORT
+      : Number(callbackPortParam);
 
   if (
     !Number.isInteger(iteration) ||
     iteration <= 0 ||
     !Number.isInteger(callbackPort) ||
     callbackPort <= 0 ||
+    launchToken === null ||
     launchToken.length === 0 ||
+    launchedAt === null ||
     launchedAt.length === 0
   ) {
     return null;

@@ -63,3 +63,7 @@ test('buildBenchUrl round-trips through parseBenchUrl for launch delivery', () =
     url,
   });
 });
+
+test('parseBenchUrl rejects missing required launch parameters', () => {
+  assert.equal(parseBenchUrl('metrobench://bench?callbackPort=4010'), null);
+});
