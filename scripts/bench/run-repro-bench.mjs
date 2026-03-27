@@ -21,6 +21,7 @@ import {
 } from './lib.mjs';
 
 const execFileAsync = promisify(execFile);
+const localHost = 'localhost';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const artifactsDir = path.resolve(
   process.env.BENCH_ARTIFACTS_DIR ?? path.join(rootDir, DEFAULT_BENCH_ARTIFACTS_DIR),
@@ -176,7 +177,7 @@ class CallbackServer {
 
     await new Promise((resolve, reject) => {
       this.server.once('error', reject);
-      this.server.listen(this.port, '127.0.0.1', resolve);
+      this.server.listen(this.port, localHost, resolve);
     });
 
     await logTimeline('callback_server_started', { port: this.port });
@@ -219,57 +220,56 @@ class CallbackServer {
   }
 }
 
-class ReporterLogMonitor {
-  constructor(filePath) {
-    this.filePath = filePath;
-    this.buffer = '';
-    this.events = [];
-    this.position = 0;
+function parseMetroStdoutEvent(line) {
+  const normalizedLine = line.trim();
+
+  if (!normalizedLine) {
+    return null;
   }
 
-  async drain() {
-    try {
-      const handle = await fs.open(this.filePath, 'r');
-      const stats = await handle.stat();
-      if (stats.size < this.position) {
-        this.position = 0;
-        this.buffer = '';
-      }
+  if (
+    /^(iOS|Android|Web) Bundled \d+ms /.test(normalizedLine) ||
+    /^Bundled \d+ms /.test(normalizedLine)
+  ) {
+    return {
+      line: normalizedLine,
+      type: 'bundle_build_done',
+    };
+  }
 
-      if (stats.size === this.position) {
-        await handle.close();
-        return;
-      }
+  if (
+    /^(iOS|Android|Web) .+\(\s*\d+\/\d+\)$/.test(normalizedLine) ||
+    /^(iOS|Android|Web) .*[░▓]/.test(normalizedLine)
+  ) {
+    return {
+      line: normalizedLine,
+      type: 'bundle_build_started',
+    };
+  }
 
-      const length = stats.size - this.position;
-      const chunk = Buffer.alloc(length);
-      await handle.read(chunk, 0, length, this.position);
-      this.position = stats.size;
-      await handle.close();
+  return null;
+}
 
-      this.buffer += chunk.toString('utf8');
-      const lines = this.buffer.split('\n');
-      this.buffer = lines.pop() ?? '';
+class MetroStdoutMonitor {
+  constructor(eventLogPath) {
+    this.eventLogPath = eventLogPath;
+    this.events = [];
+  }
 
-      for (const line of lines) {
-        if (!line.trim()) {
-          continue;
-        }
-        try {
-          this.events.push(JSON.parse(line));
-        } catch {
-          await appendJsonLine(timelineLogPath, {
-            event: 'invalid_reporter_log_line',
-            line,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
+  noteLine(line, streamName) {
+    const event = parseMetroStdoutEvent(line);
+    if (!event) {
+      return;
     }
+
+    const record = {
+      ...event,
+      streamName,
+      timestamp: new Date().toISOString(),
+    };
+
+    this.events.push(record);
+    void appendJsonLine(this.eventLogPath, record);
   }
 
   async waitFor(predicate, timeoutMs) {
@@ -277,8 +277,6 @@ class ReporterLogMonitor {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
-      await this.drain();
-
       for (const event of this.events.slice(startIndex)) {
         if (predicate(event)) {
           return event;
@@ -292,23 +290,54 @@ class ReporterLogMonitor {
   }
 }
 
-function pipeChildOutput(child, outputPath, prefix, mirrorToConsole = false) {
-  const writeChunk = async (chunk) => {
-    await appendLine(outputPath, `[${new Date().toISOString()}] ${prefix} ${chunk}`);
-    if (mirrorToConsole && chunk) {
-      console.log(`[${prefix}] ${chunk}`);
+function pipeChildOutput(child, outputPath, prefix, options = {}) {
+  const { mirrorToConsole = false, onLine } = options;
+  const pending = {
+    stderr: '',
+    stdout: '',
+  };
+
+  const emitLine = async (line, streamName) => {
+    await appendLine(outputPath, `[${new Date().toISOString()}] ${prefix} ${line}`);
+    if (mirrorToConsole && line) {
+      console.log(`[${prefix}] ${line}`);
+    }
+    onLine?.(line, streamName);
+  };
+
+  const flushChunk = async (chunk, streamName) => {
+    pending[streamName] += chunk.toString('utf8').replaceAll('\r', '\n');
+    const lines = pending[streamName].split('\n');
+    pending[streamName] = lines.pop() ?? '';
+
+    for (const line of lines) {
+      if (!line) {
+        continue;
+      }
+      await emitLine(line, streamName);
     }
   };
 
   child.stdout?.on('data', (chunk) => {
-    void writeChunk(chunk.toString('utf8').trimEnd());
+    void flushChunk(chunk, 'stdout');
   });
   child.stderr?.on('data', (chunk) => {
-    void writeChunk(chunk.toString('utf8').trimEnd());
+    void flushChunk(chunk, 'stderr');
+  });
+
+  child.once('exit', () => {
+    for (const [streamName, line] of Object.entries(pending)) {
+      if (!line) {
+        continue;
+      }
+      void emitLine(line, streamName);
+      pending[streamName] = '';
+    }
   });
 }
 
 function startMetro() {
+  const stdoutMonitor = new MetroStdoutMonitor(metroReporterLogPath);
   consoleState('Starting Metro process', {
     command: ['npx', 'expo', 'start', '--dev-client', '--localhost', '--port', String(metroPort)],
     cwd: rootDir,
@@ -330,8 +359,16 @@ function startMetro() {
   );
 
   consoleState('Metro process spawned', { pid: metro.pid ?? null });
-  pipeChildOutput(metro, metroLogPath, 'metro', true);
-  return metro;
+  pipeChildOutput(metro, metroLogPath, 'metro', {
+    mirrorToConsole: true,
+    onLine(line, streamName) {
+      stdoutMonitor.noteLine(line, streamName);
+    },
+  });
+  return {
+    metro,
+    stdoutMonitor,
+  };
 }
 
 async function stopChild(child, signal = 'SIGINT') {
@@ -365,7 +402,7 @@ async function waitForMetroReady(metro) {
     }
 
     try {
-      const response = await fetch(`http://127.0.0.1:${metroPort}/status`, {
+      const response = await fetch(`http://${localHost}:${metroPort}/status`, {
         signal: AbortSignal.timeout(1000),
       });
       const body = await response.text();
@@ -540,7 +577,7 @@ async function main() {
   };
 
   const callbackServer = new CallbackServer(callbackPort);
-  const reporterMonitor = new ReporterLogMonitor(metroReporterLogPath);
+  let metroStdoutMonitor;
   let metro;
   let simulatorLogs;
   let recording;
@@ -549,7 +586,9 @@ async function main() {
     await callbackServer.start();
     consoleState('Callback server listening', { port: callbackPort });
 
-    metro = startMetro();
+    const metroResult = startMetro();
+    metro = metroResult.metro;
+    metroStdoutMonitor = metroResult.stdoutMonitor;
     await waitForMetroReady(metro);
     await logTimeline('metro_ready', { port: metroPort });
 
@@ -606,8 +645,10 @@ async function main() {
           url: benchUrl,
         });
 
-        const bundleEvent = await reporterMonitor.waitFor(
-          (event) => event.type === 'bundle_build_started',
+        const bundleEvent = await metroStdoutMonitor.waitFor(
+          (event) =>
+            event.type === 'bundle_build_started' ||
+            event.type === 'bundle_build_done',
           bundleTimeoutMs,
         );
 

@@ -86,7 +86,7 @@ async function notifyBench(
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:${config.callbackPort}/app-ready`,
+        `http://localhost:${config.callbackPort}/app-ready`,
         {
           method: 'POST',
           headers: {
