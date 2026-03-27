@@ -52,24 +52,14 @@ jobs:
       - name: Prebuild iOS app
         run: npx expo prebuild --platform ios --clean
 
-      - name: Discover Xcode project info
-        id: ios_project
-        run: node scripts/bench/ios-project-info.mjs --github-output "$GITHUB_OUTPUT"
-
       - name: Build Debug simulator app
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -n "${{ steps.ios_project.outputs.workspace }}" ]]; then
-            CONTAINER_FLAG=(-workspace "${{ steps.ios_project.outputs.workspace }}")
-          else
-            CONTAINER_FLAG=(-project "${{ steps.ios_project.outputs.project }}")
-          fi
-
           xcodebuild \
-            "${CONTAINER_FLAG[@]}" \
-            -scheme "${{ steps.ios_project.outputs.scheme }}" \
+            -workspace ios/MetroBench.xcworkspace \
+            -scheme MetroBench \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination "generic/platform=iOS Simulator" \

@@ -8,7 +8,6 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "bench:run": "node ./scripts/bench/run-repro-bench.mjs",
-    "bench:ios-project-info": "node ./scripts/bench/ios-project-info.mjs",
     "test": "node --test scripts/bench/*.test.mjs"
   },
   "dependencies": {
