@@ -77,25 +77,9 @@ jobs:
             build \
             CODE_SIGNING_ALLOWED=NO | tee "$BENCH_ARTIFACTS_DIR/build.log"
 
-      - name: Find built app bundle
-        id: app_bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_PATH="$GITHUB_WORKSPACE/ios/build/Build/Products/Debug-iphonesimulator/MetroBench.app"
-
-          if [[ ! -d "$APP_PATH" ]]; then
-            echo "Failed to find the built .app bundle at $APP_PATH" >&2
-            echo "Known build outputs:" >&2
-            find "$GITHUB_WORKSPACE/ios/build" -maxdepth 4 \( -name '*.app' -o -name '*.framework' \) | sort >&2 || true
-            exit 1
-          fi
-
-          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
-
       - name: Run Metro repro bench
         env:
-          BENCH_APP_PATH: ${{ steps.app_bundle.outputs.app_path }}
+          BENCH_APP_PATH: ${{ github.workspace }}/ios/build/Build/Products/Debug-iphonesimulator/MetroBench.app
           BENCH_BUNDLE_TIMEOUT_SECONDS: ${{ inputs.bundle_timeout_seconds }}
           BENCH_DEVICE_NAME: ${{ inputs.device_name }}
           BENCH_ITERATIONS: ${{ inputs.iterations }}
