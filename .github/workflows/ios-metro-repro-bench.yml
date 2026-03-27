@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 70
     env:
       BENCH_ARTIFACTS_DIR: ${{ github.workspace }}/.bench-artifacts
+      BUILD_PRODUCTS_DIR: ${{ github.workspace }}/build/Products
       CI: "1"
 
     steps:
@@ -47,7 +48,9 @@ jobs:
         run: npm ci
 
       - name: Prepare artifact directory
-        run: mkdir -p "$BENCH_ARTIFACTS_DIR"
+        run: |
+          mkdir -p "$BENCH_ARTIFACTS_DIR"
+          mkdir -p "$BUILD_PRODUCTS_DIR"
 
       - name: Prebuild iOS app
         run: npx expo prebuild --platform ios --clean
@@ -74,17 +77,20 @@ jobs:
             -sdk iphonesimulator \
             -destination "generic/platform=iOS Simulator" \
             -derivedDataPath build/DerivedData \
+            CONFIGURATION_BUILD_DIR="$BUILD_PRODUCTS_DIR" \
             build | tee "$BENCH_ARTIFACTS_DIR/build.log"
 
-      - name: Find built app bundle
+      - name: Resolve built app bundle
         id: app_bundle
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$(find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name '*.app' | head -n 1)"
+          APP_PATH="$BUILD_PRODUCTS_DIR/${{ steps.ios_project.outputs.full_product_name }}"
 
-          if [[ -z "$APP_PATH" ]]; then
-            echo "Failed to find the built .app bundle." >&2
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "Expected built app bundle at: $APP_PATH" >&2
+            echo "Build products directory contents:" >&2
+            ls -la "$BUILD_PRODUCTS_DIR" >&2 || true
             exit 1
           fi
 

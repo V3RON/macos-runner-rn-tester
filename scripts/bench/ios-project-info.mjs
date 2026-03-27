@@ -36,11 +36,11 @@ async function findProjectContainer() {
 
 async function main() {
   const target = await findProjectContainer();
+  const containerArgs = [`-${target.key}`, target.path];
   const { stdout } = await execFileAsync('xcodebuild', [
     '-list',
     '-json',
-    `-${target.key}`,
-    target.path,
+    ...containerArgs,
   ]);
   const parsed = JSON.parse(stdout);
   const schemes =
@@ -52,7 +52,33 @@ async function main() {
     throw new Error(`Could not determine an Xcode scheme from ${target.path}.`);
   }
 
+  const buildSettingsOutput = await execFileAsync('xcodebuild', [
+    ...containerArgs,
+    '-scheme',
+    scheme,
+    '-configuration',
+    'Debug',
+    '-sdk',
+    'iphonesimulator',
+    '-destination',
+    'generic/platform=iOS Simulator',
+    '-showBuildSettings',
+    '-json',
+  ]);
+  const buildSettings = JSON.parse(buildSettingsOutput.stdout);
+  const appTarget =
+    buildSettings.find(
+      (entry) => entry.buildSettings?.WRAPPER_EXTENSION === 'app',
+    ) ?? buildSettings[0];
+
+  if (!appTarget?.buildSettings?.FULL_PRODUCT_NAME) {
+    throw new Error(`Could not determine the built app product name for scheme ${scheme}.`);
+  }
+
   const payload = {
+    full_product_name: appTarget.buildSettings.FULL_PRODUCT_NAME,
+    product_bundle_identifier:
+      appTarget.buildSettings.PRODUCT_BUNDLE_IDENTIFIER ?? '',
     [target.key]: target.path,
     scheme,
   };
