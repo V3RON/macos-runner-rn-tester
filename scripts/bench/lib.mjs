@@ -18,19 +18,61 @@ function compareRuntimeVersions(left, right) {
   return 0;
 }
 
-export function buildBenchUrl({
+export function buildBenchLaunchArguments({
   callbackPort,
   iteration,
   launchToken,
   launchedAt,
-  scheme,
 }) {
-  const url = new URL(`${scheme}://bench`);
-  url.searchParams.set('callbackPort', String(callbackPort));
-  url.searchParams.set('iteration', String(iteration));
-  url.searchParams.set('launchToken', launchToken);
-  url.searchParams.set('launchedAt', launchedAt);
-  return url.toString();
+  return {
+    callbackPort: String(callbackPort),
+    iteration: String(iteration),
+    launchToken,
+    launchedAt,
+  };
+}
+
+export function parseBenchLaunchArguments(launchArguments) {
+  if (!launchArguments || typeof launchArguments !== 'object') {
+    return null;
+  }
+
+  const {
+    iteration: rawIteration,
+    callbackPort: rawCallbackPort,
+    launchToken,
+    launchedAt,
+  } = launchArguments;
+  const iteration = rawIteration == null ? Number.NaN : Number(rawIteration);
+  const callbackPort =
+    rawCallbackPort == null ? Number.NaN : Number(rawCallbackPort);
+
+  if (
+    !Number.isInteger(iteration) ||
+    iteration <= 0 ||
+    !Number.isInteger(callbackPort) ||
+    callbackPort <= 0 ||
+    typeof launchToken !== 'string' ||
+    launchToken.length === 0 ||
+    typeof launchedAt !== 'string' ||
+    launchedAt.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    callbackPort,
+    iteration,
+    launchToken,
+    launchedAt,
+  };
+}
+
+export function serializeLaunchArgumentsForSimctl(launchArguments) {
+  return Object.entries(launchArguments).flatMap(([key, value]) => [
+    `-${key}`,
+    String(value),
+  ]);
 }
 
 export function chooseSimulatorDevice(devicesByRuntime, requestedName) {

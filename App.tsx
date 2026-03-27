@@ -1,14 +1,14 @@
 import Constants from 'expo-constants';
+import { LaunchArguments } from 'expo-native-launch-arguments';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 
 type LaunchConfig = {
   callbackPort: number;
   iteration: number;
   launchToken: string;
   launchedAt: string;
-  url: string | null;
 };
 
 type CallbackState =
@@ -17,28 +17,31 @@ type CallbackState =
   | { status: 'sent'; attempts: number; sentAt: string }
   | { status: 'failed'; attempts: number; error: string };
 
-const DEFAULT_CALLBACK_PORT = 4010;
 const MAX_CALLBACK_ATTEMPTS = 5;
 
-function parseLaunchConfig(url: string | null): LaunchConfig | null {
-  if (!url) {
+function parseLaunchConfig(
+  launchArguments: Record<string, string | number | boolean> | null,
+): LaunchConfig | null {
+  if (!launchArguments) {
     return null;
   }
 
-  let parsedUrl: URL;
-
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return null;
-  }
-
-  const iteration = Number(parsedUrl.searchParams.get('iteration') ?? '');
-  const callbackPort = Number(
-    parsedUrl.searchParams.get('callbackPort') ?? DEFAULT_CALLBACK_PORT,
-  );
-  const launchToken = parsedUrl.searchParams.get('launchToken') ?? '';
-  const launchedAt = parsedUrl.searchParams.get('launchedAt') ?? '';
+  const iteration =
+    launchArguments.iteration == null
+      ? Number.NaN
+      : Number(launchArguments.iteration);
+  const callbackPort =
+    launchArguments.callbackPort == null
+      ? Number.NaN
+      : Number(launchArguments.callbackPort);
+  const launchToken =
+    typeof launchArguments.launchToken === 'string'
+      ? launchArguments.launchToken
+      : '';
+  const launchedAt =
+    typeof launchArguments.launchedAt === 'string'
+      ? launchArguments.launchedAt
+      : '';
 
   if (
     !Number.isInteger(iteration) ||
@@ -56,7 +59,6 @@ function parseLaunchConfig(url: string | null): LaunchConfig | null {
     iteration,
     launchToken,
     launchedAt,
-    url,
   };
 }
 
@@ -76,7 +78,6 @@ async function notifyBench(
     launchedAt: config.launchedAt,
     platform: Platform.OS,
     timestamp: new Date().toISOString(),
-    url: config.url,
   };
 
   let lastError = 'unknown error';
@@ -117,34 +118,15 @@ async function notifyBench(
 }
 
 export default function App() {
-  const [launchConfig, setLaunchConfig] = useState<LaunchConfig | null>(null);
+  const [launchConfig] = useState<LaunchConfig | null>(() =>
+    parseLaunchConfig(
+      LaunchArguments.value<Record<string, string | number | boolean>>(),
+    ),
+  );
   const [callbackState, setCallbackState] = useState<CallbackState>({
     status: 'waiting-for-launch',
   });
   const sentLaunchTokens = useRef(new Set<string>());
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const applyLaunchUrl = (url: string | null) => {
-      const parsed = parseLaunchConfig(url);
-      if (!parsed || !isMounted) {
-        return;
-      }
-      setLaunchConfig(parsed);
-    };
-
-    void Linking.getInitialURL().then(applyLaunchUrl);
-
-    const subscription = Linking.addEventListener('url', ({ url }) => {
-      applyLaunchUrl(url);
-    });
-
-    return () => {
-      isMounted = false;
-      subscription.remove();
-    };
-  }, []);
 
   useEffect(() => {
     if (!launchConfig) {
