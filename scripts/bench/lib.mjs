@@ -18,52 +18,43 @@ function compareRuntimeVersions(left, right) {
   return 0;
 }
 
-export function buildBenchUrl({
+export function buildBenchLaunchArguments({
   callbackPort,
   iteration,
   launchToken,
   launchedAt,
-  scheme,
 }) {
-  const url = new URL(`${scheme}://bench`);
-  url.searchParams.set('callbackPort', String(callbackPort));
-  url.searchParams.set('iteration', String(iteration));
-  url.searchParams.set('launchToken', launchToken);
-  url.searchParams.set('launchedAt', launchedAt);
-  return url.toString();
+  return {
+    callbackPort: String(callbackPort),
+    iteration: String(iteration),
+    launchToken,
+    launchedAt,
+  };
 }
 
-export function parseBenchUrl(url) {
-  if (!url) {
+export function parseBenchLaunchArguments(launchArguments) {
+  if (!launchArguments || typeof launchArguments !== 'object') {
     return null;
   }
 
-  let parsedUrl;
-
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return null;
-  }
-
-  const iterationParam = parsedUrl.searchParams.get('iteration');
-  const callbackPortParam = parsedUrl.searchParams.get('callbackPort');
-  const launchToken = parsedUrl.searchParams.get('launchToken');
-  const launchedAt = parsedUrl.searchParams.get('launchedAt');
-  const iteration = iterationParam === null ? Number.NaN : Number(iterationParam);
+  const {
+    iteration: rawIteration,
+    callbackPort: rawCallbackPort,
+    launchToken,
+    launchedAt,
+  } = launchArguments;
+  const iteration = rawIteration == null ? Number.NaN : Number(rawIteration);
   const callbackPort =
-    callbackPortParam === null
-      ? DEFAULT_CALLBACK_PORT
-      : Number(callbackPortParam);
+    rawCallbackPort == null ? Number.NaN : Number(rawCallbackPort);
 
   if (
     !Number.isInteger(iteration) ||
     iteration <= 0 ||
     !Number.isInteger(callbackPort) ||
     callbackPort <= 0 ||
-    launchToken === null ||
+    typeof launchToken !== 'string' ||
     launchToken.length === 0 ||
-    launchedAt === null ||
+    typeof launchedAt !== 'string' ||
     launchedAt.length === 0
   ) {
     return null;
@@ -74,8 +65,14 @@ export function parseBenchUrl(url) {
     iteration,
     launchToken,
     launchedAt,
-    url,
   };
+}
+
+export function serializeLaunchArgumentsForSimctl(launchArguments) {
+  return Object.entries(launchArguments).flatMap(([key, value]) => [
+    `-${key}`,
+    String(value),
+  ]);
 }
 
 export function chooseSimulatorDevice(devicesByRuntime, requestedName) {

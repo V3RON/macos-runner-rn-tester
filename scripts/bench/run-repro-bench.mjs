@@ -13,10 +13,11 @@ import {
   DEFAULT_ITERATIONS,
   DEFAULT_METRO_PORT,
   DEFAULT_READY_TIMEOUT_SECONDS,
-  buildBenchUrl,
+  buildBenchLaunchArguments,
   chooseSimulatorDevice,
   parsePositiveInt,
   serializeError,
+  serializeLaunchArgumentsForSimctl,
   sleep,
 } from './lib.mjs';
 
@@ -501,8 +502,14 @@ async function terminateApp(udid, bundleIdentifier) {
   });
 }
 
-async function openBenchUrl(udid, url) {
-  return runCommand('xcrun', ['simctl', 'openurl', udid, url]);
+async function launchBenchApp(udid, bundleIdentifier, launchArguments) {
+  return runCommand('xcrun', [
+    'simctl',
+    'launch',
+    udid,
+    bundleIdentifier,
+    ...serializeLaunchArgumentsForSimctl(launchArguments),
+  ]);
 }
 
 async function writeSummary(summary) {
@@ -521,20 +528,12 @@ async function main() {
   const expoConfig = await readExpoConfig();
   const bundleIdentifier =
     process.env.BENCH_BUNDLE_IDENTIFIER ?? expoConfig.ios?.bundleIdentifier;
-  const schemeValue = Array.isArray(expoConfig.scheme)
-    ? expoConfig.scheme[0]
-    : expoConfig.scheme;
-  const urlScheme = process.env.BENCH_URL_SCHEME ?? schemeValue;
   const appPath = process.env.BENCH_APP_PATH
     ? path.resolve(process.env.BENCH_APP_PATH)
     : null;
 
   if (!bundleIdentifier) {
     throw new Error('BENCH_BUNDLE_IDENTIFIER is not set and app.json has no ios.bundleIdentifier.');
-  }
-
-  if (!urlScheme) {
-    throw new Error('BENCH_URL_SCHEME is not set and app.json has no scheme.');
   }
 
   if (!appPath) {
@@ -551,7 +550,6 @@ async function main() {
     iterations,
     metroPort,
     readyTimeoutMs,
-    urlScheme,
   });
   await logTimeline('bench_started', {
     appPath,
@@ -560,7 +558,6 @@ async function main() {
     callbackPort,
     iterations,
     readyTimeoutMs,
-    urlScheme,
   });
 
   const summary = {
@@ -604,12 +601,11 @@ async function main() {
     for (let iteration = 1; iteration <= iterations; iteration += 1) {
       const launchToken = randomUUID();
       const launchedAt = new Date().toISOString();
-      const benchUrl = buildBenchUrl({
+      const benchLaunchArguments = buildBenchLaunchArguments({
         callbackPort,
         iteration,
         launchToken,
         launchedAt,
-        scheme: urlScheme,
       });
 
       callbackServer.expect({ iteration, launchToken });
@@ -624,10 +620,10 @@ async function main() {
       await logTimeline('iteration_started', { iteration, launchToken });
 
       try {
-        await openBenchUrl(device.udid, benchUrl);
-        consoleState('Requested app launch via bench deep link (simctl does not confirm system dialogs)', {
+        await launchBenchApp(device.udid, bundleIdentifier, benchLaunchArguments);
+        consoleState('Requested app launch via simctl launch arguments', {
           iteration,
-          url: benchUrl,
+          launchArguments: benchLaunchArguments,
         });
 
         const bundleEvent = await metroStdoutMonitor.waitFor(
