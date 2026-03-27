@@ -1,0 +1,103 @@
+name: iOS Metro Repro Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Number of launch attempts to run
+        required: true
+        default: "10"
+      bundle_timeout_seconds:
+        description: Timeout for detecting Metro bundling on each iteration
+        required: true
+        default: "60"
+      ready_timeout_seconds:
+        description: Timeout for the app-ready callback after bundling starts
+        required: true
+        default: "30"
+      device_name:
+        description: Optional simulator name override, for example iPhone 16
+        required: false
+        default: ""
+
+jobs:
+  repro:
+    runs-on: macos-latest
+    timeout-minutes: 70
+    env:
+      BENCH_ARTIFACTS_DIR: ${{ github.workspace }}/.bench-artifacts
+      CI: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare artifact directory
+        run: mkdir -p "$BENCH_ARTIFACTS_DIR"
+
+      - name: Prebuild iOS app
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Discover Xcode project info
+        id: ios_project
+        run: node scripts/bench/ios-project-info.mjs --github-output "$GITHUB_OUTPUT"
+
+      - name: Build Debug simulator app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ steps.ios_project.outputs.workspace }}" ]]; then
+            CONTAINER_FLAG=(-workspace "${{ steps.ios_project.outputs.workspace }}")
+          else
+            CONTAINER_FLAG=(-project "${{ steps.ios_project.outputs.project }}")
+          fi
+
+          xcodebuild \
+            "${CONTAINER_FLAG[@]}" \
+            -scheme "${{ steps.ios_project.outputs.scheme }}" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath build/DerivedData \
+            build | tee "$BENCH_ARTIFACTS_DIR/build.log"
+
+      - name: Find built app bundle
+        id: app_bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name '*.app' | head -n 1)"
+
+          if [[ -z "$APP_PATH" ]]; then
+            echo "Failed to find the built .app bundle." >&2
+            exit 1
+          fi
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Run Metro repro bench
+        env:
+          BENCH_APP_PATH: ${{ steps.app_bundle.outputs.app_path }}
+          BENCH_BUNDLE_TIMEOUT_SECONDS: ${{ inputs.bundle_timeout_seconds }}
+          BENCH_DEVICE_NAME: ${{ inputs.device_name }}
+          BENCH_ITERATIONS: ${{ inputs.iterations }}
+          BENCH_READY_TIMEOUT_SECONDS: ${{ inputs.ready_timeout_seconds }}
+        run: node scripts/bench/run-repro-bench.mjs
+
+      - name: Upload repro artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-metro-repro-bench-artifacts
+          path: ${{ env.BENCH_ARTIFACTS_DIR }}
+          if-no-files-found: warn

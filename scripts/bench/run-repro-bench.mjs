@@ -1,0 +1,625 @@
+import { randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+import {
+  DEFAULT_BENCH_ARTIFACTS_DIR,
+  DEFAULT_BUNDLE_TIMEOUT_SECONDS,
+  DEFAULT_CALLBACK_PORT,
+  DEFAULT_ITERATIONS,
+  DEFAULT_METRO_PORT,
+  DEFAULT_READY_TIMEOUT_SECONDS,
+  buildBenchUrl,
+  chooseSimulatorDevice,
+  parsePositiveInt,
+  serializeError,
+  sleep,
+} from './lib.mjs';
+
+const execFileAsync = promisify(execFile);
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const artifactsDir = path.resolve(
+  process.env.BENCH_ARTIFACTS_DIR ?? path.join(rootDir, DEFAULT_BENCH_ARTIFACTS_DIR),
+);
+const timelineLogPath = path.join(artifactsDir, 'timeline.jsonl');
+const callbackLogPath = path.join(artifactsDir, 'callback-server.jsonl');
+const metroLogPath = path.join(artifactsDir, 'metro.log');
+const metroReporterLogPath = path.join(artifactsDir, 'metro-reporter.jsonl');
+const simulatorLogPath = path.join(artifactsDir, 'simulator.log');
+const summaryPath = path.join(artifactsDir, 'bench-summary.json');
+const videoPath = path.join(artifactsDir, 'simulator-current-run.mp4');
+const recordingLogPath = path.join(artifactsDir, 'recording.log');
+const bundleTimeoutMs =
+  parsePositiveInt(
+    process.env.BENCH_BUNDLE_TIMEOUT_SECONDS,
+    DEFAULT_BUNDLE_TIMEOUT_SECONDS,
+  ) * 1000;
+const callbackPort = parsePositiveInt(
+  process.env.BENCH_CALLBACK_PORT,
+  DEFAULT_CALLBACK_PORT,
+);
+const iterations = parsePositiveInt(process.env.BENCH_ITERATIONS, DEFAULT_ITERATIONS);
+const metroPort = parsePositiveInt(process.env.BENCH_METRO_PORT, DEFAULT_METRO_PORT);
+const readyTimeoutMs =
+  parsePositiveInt(
+    process.env.BENCH_READY_TIMEOUT_SECONDS,
+    DEFAULT_READY_TIMEOUT_SECONDS,
+  ) * 1000;
+
+function appendLine(filePath, line) {
+  return fs.appendFile(filePath, `${line}\n`);
+}
+
+async function appendJsonLine(filePath, payload) {
+  await appendLine(filePath, JSON.stringify(payload));
+}
+
+async function ensureArtifactsDir() {
+  await fs.mkdir(artifactsDir, { recursive: true });
+}
+
+async function readExpoConfig() {
+  const appJson = JSON.parse(
+    await fs.readFile(path.join(rootDir, 'app.json'), 'utf8'),
+  );
+  return appJson.expo ?? {};
+}
+
+async function logTimeline(event, payload = {}) {
+  await appendJsonLine(timelineLogPath, {
+    event,
+    payload,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+async function runCommand(command, args, options = {}) {
+  const { allowFailure = false, cwd = rootDir } = options;
+
+  try {
+    const result = await execFileAsync(command, args, {
+      cwd,
+      env: process.env,
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    return {
+      code: 0,
+      stderr: result.stderr,
+      stdout: result.stdout,
+    };
+  } catch (error) {
+    if (allowFailure) {
+      return {
+        code: error.code ?? 1,
+        stderr: error.stderr ?? '',
+        stdout: error.stdout ?? '',
+      };
+    }
+    throw error;
+  }
+}
+
+class CallbackServer {
+  constructor(port) {
+    this.port = port;
+    this.expectedIteration = null;
+    this.expectedLaunchToken = null;
+    this.events = [];
+    this.server = null;
+  }
+
+  expect({ iteration, launchToken }) {
+    this.expectedIteration = iteration;
+    this.expectedLaunchToken = launchToken;
+  }
+
+  async start() {
+    this.server = http.createServer(async (request, response) => {
+      if (!request.url) {
+        response.writeHead(400).end();
+        return;
+      }
+
+      if (request.method === 'GET' && request.url === '/health') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/app-ready') {
+        const body = await new Promise((resolve, reject) => {
+          let raw = '';
+          request.setEncoding('utf8');
+          request.on('data', (chunk) => {
+            raw += chunk;
+          });
+          request.on('end', () => resolve(raw));
+          request.on('error', reject);
+        });
+
+        let payload;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          response.writeHead(400).end();
+          return;
+        }
+
+        const entry = {
+          ...payload,
+          receivedAt: new Date().toISOString(),
+        };
+
+        this.events.push(entry);
+        await appendJsonLine(callbackLogPath, entry);
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      response.writeHead(404).end();
+    });
+
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(this.port, '127.0.0.1', resolve);
+    });
+
+    await logTimeline('callback_server_started', { port: this.port });
+  }
+
+  async stop() {
+    if (!this.server) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      this.server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  async waitForReady({ iteration, launchToken }, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const event = this.events.find(
+        (candidate) =>
+          candidate.iteration === iteration &&
+          candidate.launchToken === launchToken,
+      );
+
+      if (event) {
+        return event;
+      }
+
+      await sleep(250);
+    }
+
+    return null;
+  }
+}
+
+class ReporterLogMonitor {
+  constructor(filePath) {
+    this.filePath = filePath;
+    this.buffer = '';
+    this.events = [];
+    this.position = 0;
+  }
+
+  async drain() {
+    try {
+      const handle = await fs.open(this.filePath, 'r');
+      const stats = await handle.stat();
+      if (stats.size < this.position) {
+        this.position = 0;
+        this.buffer = '';
+      }
+
+      if (stats.size === this.position) {
+        await handle.close();
+        return;
+      }
+
+      const length = stats.size - this.position;
+      const chunk = Buffer.alloc(length);
+      await handle.read(chunk, 0, length, this.position);
+      this.position = stats.size;
+      await handle.close();
+
+      this.buffer += chunk.toString('utf8');
+      const lines = this.buffer.split('\n');
+      this.buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+        try {
+          this.events.push(JSON.parse(line));
+        } catch {
+          await appendJsonLine(timelineLogPath, {
+            event: 'invalid_reporter_log_line',
+            line,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+  }
+
+  async waitFor(predicate, timeoutMs) {
+    const startIndex = this.events.length;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await this.drain();
+
+      for (const event of this.events.slice(startIndex)) {
+        if (predicate(event)) {
+          return event;
+        }
+      }
+
+      await sleep(250);
+    }
+
+    return null;
+  }
+}
+
+function pipeChildOutput(child, outputPath, prefix) {
+  const writeChunk = async (chunk) => {
+    await appendLine(outputPath, `[${new Date().toISOString()}] ${prefix} ${chunk}`);
+  };
+
+  child.stdout?.on('data', (chunk) => {
+    void writeChunk(chunk.toString('utf8').trimEnd());
+  });
+  child.stderr?.on('data', (chunk) => {
+    void writeChunk(chunk.toString('utf8').trimEnd());
+  });
+}
+
+function startMetro() {
+  const metro = spawn(
+    'npx',
+    ['expo', 'start', '--dev-client', '--localhost', '--port', String(metroPort)],
+    {
+      cwd: rootDir,
+      env: {
+        ...process.env,
+        CI: '1',
+        METRO_REPORTER_LOG_PATH: metroReporterLogPath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+
+  pipeChildOutput(metro, metroLogPath, 'metro');
+  return metro;
+}
+
+async function stopChild(child, signal = 'SIGINT') {
+  if (!child || child.exitCode !== null || child.killed) {
+    return;
+  }
+
+  child.kill(signal);
+  await new Promise((resolve) => {
+    child.once('exit', resolve);
+    setTimeout(() => {
+      if (child.exitCode === null) {
+        child.kill('SIGKILL');
+      }
+    }, 5000);
+  });
+}
+
+async function waitForMetroReady(metro) {
+  const deadline = Date.now() + bundleTimeoutMs;
+
+  while (Date.now() < deadline) {
+    if (metro.exitCode !== null) {
+      throw new Error(`Metro exited early with code ${metro.exitCode}.`);
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${metroPort}/status`, {
+        signal: AbortSignal.timeout(1000),
+      });
+      const body = await response.text();
+      if (response.ok && body.includes('packager-status:running')) {
+        return;
+      }
+    } catch {
+      // Keep polling until the timeout expires.
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('Metro did not become ready before the timeout.');
+}
+
+async function pickSimulatorUdId(requestedDeviceName) {
+  const result = await runCommand('xcrun', [
+    'simctl',
+    'list',
+    'devices',
+    'available',
+    '--json',
+  ]);
+  const parsed = JSON.parse(result.stdout);
+  const device = chooseSimulatorDevice(parsed.devices, requestedDeviceName ?? '');
+
+  if (!device) {
+    throw new Error('Could not find an available iPhone simulator.');
+  }
+
+  return device;
+}
+
+async function bootSimulator(udid) {
+  await runCommand('xcrun', ['simctl', 'boot', udid], { allowFailure: true });
+  await runCommand('xcrun', ['simctl', 'bootstatus', udid, '-b']);
+}
+
+function startSimulatorLogStream(udid) {
+  const child = spawn(
+    'xcrun',
+    ['simctl', 'spawn', udid, 'log', 'stream', '--style', 'compact', '--level', 'debug'],
+    {
+      cwd: rootDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+
+  pipeChildOutput(child, simulatorLogPath, 'simulator');
+  return child;
+}
+
+function startRecording(udid) {
+  const child = spawn(
+    'xcrun',
+    ['simctl', 'io', udid, 'recordVideo', '--codec', 'h264', videoPath],
+    {
+      cwd: rootDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+
+  pipeChildOutput(child, recordingLogPath, 'recording');
+  return child;
+}
+
+async function installApp(udid, bundleIdentifier, appPath) {
+  await runCommand('xcrun', ['simctl', 'uninstall', udid, bundleIdentifier], {
+    allowFailure: true,
+  });
+  await runCommand('xcrun', ['simctl', 'install', udid, appPath]);
+}
+
+async function terminateApp(udid, bundleIdentifier) {
+  await runCommand('xcrun', ['simctl', 'terminate', udid, bundleIdentifier], {
+    allowFailure: true,
+  });
+}
+
+async function launchApp(udid, bundleIdentifier) {
+  return runCommand('xcrun', ['simctl', 'launch', udid, bundleIdentifier]);
+}
+
+async function openBenchUrl(udid, url) {
+  return runCommand('xcrun', ['simctl', 'openurl', udid, url]);
+}
+
+async function writeSummary(summary) {
+  await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+}
+
+async function main() {
+  await ensureArtifactsDir();
+  await fs.writeFile(metroLogPath, '');
+  await fs.writeFile(metroReporterLogPath, '');
+  await fs.writeFile(simulatorLogPath, '');
+  await fs.writeFile(callbackLogPath, '');
+  await fs.writeFile(timelineLogPath, '');
+  await fs.writeFile(recordingLogPath, '');
+
+  const expoConfig = await readExpoConfig();
+  const bundleIdentifier =
+    process.env.BENCH_BUNDLE_IDENTIFIER ?? expoConfig.ios?.bundleIdentifier;
+  const schemeValue = Array.isArray(expoConfig.scheme)
+    ? expoConfig.scheme[0]
+    : expoConfig.scheme;
+  const urlScheme = process.env.BENCH_URL_SCHEME ?? schemeValue;
+  const appPath = process.env.BENCH_APP_PATH
+    ? path.resolve(process.env.BENCH_APP_PATH)
+    : null;
+
+  if (!bundleIdentifier) {
+    throw new Error('BENCH_BUNDLE_IDENTIFIER is not set and app.json has no ios.bundleIdentifier.');
+  }
+
+  if (!urlScheme) {
+    throw new Error('BENCH_URL_SCHEME is not set and app.json has no scheme.');
+  }
+
+  if (!appPath) {
+    throw new Error('BENCH_APP_PATH must point to the built iOS .app bundle.');
+  }
+
+  await fs.access(appPath);
+  await logTimeline('bench_started', {
+    appPath,
+    bundleIdentifier,
+    bundleTimeoutMs,
+    callbackPort,
+    iterations,
+    readyTimeoutMs,
+    urlScheme,
+  });
+
+  const summary = {
+    appPath,
+    bundleIdentifier,
+    callbackPort,
+    device: null,
+    iterations: [],
+    status: 'running',
+  };
+
+  const callbackServer = new CallbackServer(callbackPort);
+  const reporterMonitor = new ReporterLogMonitor(metroReporterLogPath);
+  let metro;
+  let simulatorLogs;
+  let recording;
+
+  try {
+    await callbackServer.start();
+
+    metro = startMetro();
+    await waitForMetroReady(metro);
+    await logTimeline('metro_ready', { port: metroPort });
+
+    const device = await pickSimulatorUdId(process.env.BENCH_DEVICE_NAME);
+    summary.device = device;
+    await logTimeline('simulator_selected', device);
+    await bootSimulator(device.udid);
+
+    simulatorLogs = startSimulatorLogStream(device.udid);
+    await installApp(device.udid, bundleIdentifier, appPath);
+    await logTimeline('app_installed', { appPath, udid: device.udid });
+
+    for (let iteration = 1; iteration <= iterations; iteration += 1) {
+      const launchToken = randomUUID();
+      const launchedAt = new Date().toISOString();
+      const benchUrl = buildBenchUrl({
+        callbackPort,
+        iteration,
+        launchToken,
+        launchedAt,
+        scheme: urlScheme,
+      });
+
+      callbackServer.expect({ iteration, launchToken });
+      await terminateApp(device.udid, bundleIdentifier);
+      await fs.rm(videoPath, { force: true });
+      recording = startRecording(device.udid);
+      await logTimeline('iteration_started', { iteration, launchToken });
+
+      try {
+        const launchResult = await launchApp(device.udid, bundleIdentifier);
+        await logTimeline('launch_command_complete', {
+          iteration,
+          stderr: launchResult.stderr.trim(),
+          stdout: launchResult.stdout.trim(),
+        });
+        await openBenchUrl(device.udid, benchUrl);
+
+        const bundleEvent = await reporterMonitor.waitFor(
+          (event) => event.type === 'bundle_build_started',
+          bundleTimeoutMs,
+        );
+
+        if (!bundleEvent) {
+          throw Object.assign(new Error('No Metro bundling detected before timeout.'), {
+            code: 'bundle_timeout',
+          });
+        }
+
+        const readyEvent = await callbackServer.waitForReady(
+          { iteration, launchToken },
+          readyTimeoutMs,
+        );
+
+        if (!readyEvent) {
+          throw Object.assign(new Error('App did not report readiness before timeout.'), {
+            code: 'app_ready_timeout',
+          });
+        }
+
+        summary.iterations.push({
+          appReadyEvent: readyEvent,
+          bundleEvent,
+          iteration,
+          launchToken,
+          launchedAt,
+          status: 'passed',
+        });
+        await logTimeline('iteration_passed', { iteration, launchToken });
+        await terminateApp(device.udid, bundleIdentifier);
+        await stopChild(recording);
+        recording = null;
+      } catch (error) {
+        const failureCode =
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          typeof error.code === 'string'
+            ? error.code
+            : 'launch_failed';
+
+        summary.iterations.push({
+          error: serializeError(error),
+          failureCode,
+          iteration,
+          launchToken,
+          launchedAt,
+          status: 'failed',
+        });
+        summary.status = 'failed';
+        summary.failureCode = failureCode;
+        await logTimeline('iteration_failed', {
+          failureCode,
+          iteration,
+          launchToken,
+        });
+        await terminateApp(device.udid, bundleIdentifier);
+        await stopChild(recording);
+        recording = null;
+        throw error;
+      }
+    }
+
+    summary.status = 'passed';
+  } catch (error) {
+    if (summary.status !== 'failed') {
+      summary.status =
+        error instanceof Error && error.message.includes('Metro did not become ready')
+          ? 'metro_not_ready'
+          : 'failed';
+      summary.error = serializeError(error);
+    } else {
+      summary.error = serializeError(error);
+    }
+    throw error;
+  } finally {
+    await writeSummary(summary);
+    await stopChild(recording);
+    await stopChild(simulatorLogs);
+    await stopChild(metro);
+    await callbackServer.stop().catch(() => {});
+    await logTimeline('bench_finished', { status: summary.status });
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.stack ?? error.message : error);
+  process.exitCode = 1;
+});
